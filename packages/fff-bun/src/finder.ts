@@ -12,6 +12,7 @@ import {
   ensureLoaded,
   ffiCreate,
   ffiDestroy,
+  ffiDrainChanges,
   ffiGetHistoricalQuery,
   ffiGetScanProgress,
   ffiHealthCheck,
@@ -130,6 +131,17 @@ export class FileFinder {
       ffiDestroy(this.handle);
       this.handle = null;
     }
+  }
+
+  /**
+   * Drain and return all changed file paths since last drain.
+   *
+   * Used by MCX for FTS5 content re-indexing. Returns absolute paths
+   * of files that have been modified/created since the last drain call.
+   */
+  drainChanges(): string[] {
+    if (this.handle === null) return [];
+    return ffiDrainChanges(this.handle);
   }
 
   /**

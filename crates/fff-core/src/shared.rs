@@ -1,8 +1,44 @@
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use crate::error::Error;
 use crate::file_picker::FilePicker;
+
+/// Thread-safe queue of changed file paths for external consumers.
+/// Used by MCX to re-index content when files change.
+#[derive(Clone, Default, Debug)]
+pub struct SharedChangesQueue(Arc<Mutex<Vec<PathBuf>>>);
+
+impl SharedChangesQueue {
+    /// Push a changed path to the queue.
+    pub fn push(&self, path: PathBuf) {
+        if let Ok(mut queue) = self.0.lock() {
+            queue.push(path);
+        }
+    }
+
+    /// Push multiple changed paths to the queue.
+    pub fn extend(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        if let Ok(mut queue) = self.0.lock() {
+            queue.extend(paths);
+        }
+    }
+
+    /// Drain and return all changed paths, clearing the queue.
+    pub fn drain(&self) -> Vec<PathBuf> {
+        if let Ok(mut queue) = self.0.lock() {
+            queue.drain(..).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Check if there are pending changes.
+    pub fn has_changes(&self) -> bool {
+        self.0.lock().map(|q| !q.is_empty()).unwrap_or(false)
+    }
+}
 use crate::frecency::FrecencyTracker;
 use crate::git::GitStatusCache;
 use crate::query_tracker::QueryTracker;

@@ -1,7 +1,7 @@
 use crate::error::Error;
 use crate::file_picker::{FFFMode, FilePicker};
 use crate::git::GitStatusCache;
-use crate::shared::{SharedFrecency, SharedPicker};
+use crate::shared::{SharedChangesQueue, SharedFrecency, SharedPicker};
 use crate::sort_buffer::sort_with_buffer;
 use git2::Repository;
 use notify::event::{AccessKind, AccessMode};
@@ -47,6 +47,7 @@ impl BackgroundWatcher {
         git_workdir: Option<PathBuf>,
         shared_picker: SharedPicker,
         shared_frecency: SharedFrecency,
+        changes_queue: Option<SharedChangesQueue>,
         mode: FFFMode,
     ) -> Result<Self, Error> {
         info!(
@@ -56,7 +57,7 @@ impl BackgroundWatcher {
         );
 
         let debouncer =
-            Self::create_debouncer(base_path, git_workdir, shared_picker, shared_frecency, mode)?;
+            Self::create_debouncer(base_path, git_workdir, shared_picker, shared_frecency, changes_queue, mode)?;
         info!("Background file watcher initialized successfully");
 
         let stop_signal = Arc::new(AtomicBool::new(false));
@@ -94,6 +95,7 @@ impl BackgroundWatcher {
         git_workdir: Option<PathBuf>,
         shared_picker: SharedPicker,
         shared_frecency: SharedFrecency,
+        changes_queue: Option<SharedChangesQueue>,
         mode: FFFMode,
     ) -> Result<Debouncer, Error> {
         // do not follow symlinks as then notifiers spawns a bunch of events for symlinked
@@ -102,6 +104,7 @@ impl BackgroundWatcher {
         let config = Config::default().with_follow_symlinks(false);
 
         let git_workdir_for_handler = git_workdir.clone();
+        let changes_queue_for_handler = changes_queue.clone();
         let mut debouncer = new_debouncer_opt(
             DEBOUNCE_TIMEOUT,
             Some(DEBOUNCE_TIMEOUT / 2), // tick rate for the event span
@@ -113,6 +116,7 @@ impl BackgroundWatcher {
                             &git_workdir_for_handler,
                             &shared_picker,
                             &shared_frecency,
+                            &changes_queue_for_handler,
                             mode,
                         );
                     }
@@ -197,6 +201,7 @@ fn handle_debounced_events(
     git_workdir: &Option<PathBuf>,
     shared_picker: &SharedPicker,
     shared_frecency: &SharedFrecency,
+    changes_queue: &Option<SharedChangesQueue>,
     mode: FFFMode,
 ) {
     // this will be called very often, we have to minimiy the lock time for file picker
@@ -363,6 +368,19 @@ fn handle_debounced_events(
             Vec::new()
         };
 
+    // Notify external consumers (e.g., MCX for FTS5 re-indexing)
+    // Queue both modified AND deleted paths so consumers can update their indexes
+    if let Some(queue) = changes_queue {
+        if !files_to_update_git_status.is_empty() {
+            queue.extend(files_to_update_git_status.iter().cloned());
+            debug!("Queued {} modified files for external consumers", files_to_update_git_status.len());
+        }
+        if !paths_to_remove.is_empty() {
+            queue.extend(paths_to_remove.iter().map(|p| p.to_path_buf()));
+            debug!("Queued {} deleted files for external consumers", paths_to_remove.len());
+        }
+    }
+
     // AI mode: auto-track frecency for all modified/created files.
     // Uses a 5-minute cooldown per file to prevent score inflation from rapid
     // burst edits (AI agents often edit the same file many times in minutes).
@@ -479,13 +497,19 @@ fn should_include_file(path: &Path, repo: &Option<Repository>) -> bool {
         return false;
     }
 
+    // Canonicalize path to remove . and .. components that confuse git2
+    let normalized = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => path.to_path_buf(),
+    };
+
     match repo.as_ref() {
-        Some(repo) => repo.is_path_ignored(path) != Ok(true),
+        Some(repo) => repo.is_path_ignored(&normalized) != Ok(true),
         None => {
             // No git repo — apply basic sanity filters.
             // Hidden directories are skipped by the watcher setup (hidden(true)),
             // but events can still arrive for files in known non-code directories.
-            !is_non_code_directory(path)
+            !is_non_code_directory(&normalized)
         }
     }
 }

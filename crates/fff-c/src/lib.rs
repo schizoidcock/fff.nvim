@@ -34,7 +34,7 @@ use fff::file_picker::FilePicker;
 use fff::frecency::FrecencyTracker;
 use fff::query_tracker::QueryTracker;
 use fff::{DbHealthChecker, FFFMode, FuzzySearchOptions, PaginationArgs, QueryParser};
-use fff::{SharedFrecency, SharedPicker};
+use fff::{SharedChangesQueue, SharedFrecency, SharedPicker};
 use ffi_types::{
     FffFileItem, FffGrepMatch, FffGrepResult, FffResult, FffScanProgress, FffScore, FffSearchResult,
 };
@@ -47,6 +47,7 @@ struct FffInstance {
     picker: SharedPicker,
     frecency: SharedFrecency,
     query_tracker: SharedQueryTracker,
+    changes_queue: SharedChangesQueue,
 }
 
 /// Helper to convert C string to Rust &str.
@@ -179,10 +180,14 @@ pub unsafe extern "C" fn fff_create_instance(
         FFFMode::Neovim
     };
 
+    // Initialize changes queue for external consumers (e.g., MCX FTS5 re-indexing)
+    let changes_queue = SharedChangesQueue::default();
+
     // Initialize file picker (writes directly into shared_picker)
     if let Err(e) = FilePicker::new_with_shared_state(
         shared_picker.clone(),
         shared_frecency.clone(),
+        Some(changes_queue.clone()),
         fff::FilePickerOptions {
             base_path: base_path_str,
             warmup_mmap_cache,
@@ -198,6 +203,7 @@ pub unsafe extern "C" fn fff_create_instance(
         picker: shared_picker,
         frecency: shared_frecency,
         query_tracker,
+        changes_queue,
     });
 
     let fff_handle = Box::into_raw(instance) as *mut c_void;
@@ -227,6 +233,42 @@ pub unsafe extern "C" fn fff_destroy(fff_handle: *mut c_void) {
     }
     if let Ok(mut guard) = instance.query_tracker.write() {
         *guard = None;
+    }
+}
+
+/// Drain and return all changed file paths since last drain.
+///
+/// Returns a JSON array of absolute paths that have been modified/created.
+/// Used by MCX for FTS5 content re-indexing.
+///
+/// ## Safety
+/// `fff_handle` must be a valid pointer returned by `fff_create_instance`, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_drain_changes(fff_handle: *mut c_void) -> *mut c_char {
+    if fff_handle.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let instance = match unsafe { instance_ref(fff_handle) } {
+        Ok(inst) => inst,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    let changes = instance.changes_queue.drain();
+    if changes.is_empty() {
+        return std::ptr::null_mut();
+    }
+
+    // Convert to JSON array of path strings
+    let paths: Vec<String> = changes.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let json = match serde_json::to_string(&paths) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    match CString::new(json) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
@@ -662,6 +704,7 @@ pub unsafe extern "C" fn fff_restart_index(
     match FilePicker::new_with_shared_state(
         inst.picker.clone(),
         inst.frecency.clone(),
+        Some(inst.changes_queue.clone()),
         fff::FilePickerOptions {
             base_path: canonical_path.to_string_lossy().to_string(),
             warmup_mmap_cache: warmup_caches,

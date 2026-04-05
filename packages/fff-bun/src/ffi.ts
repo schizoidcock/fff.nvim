@@ -55,6 +55,10 @@ const ffiDefinition = {
     args: [FFIType.ptr],
     returns: FFIType.void,
   },
+  fff_drain_changes: {
+    args: [FFIType.ptr],
+    returns: FFIType.cstring,
+  },
 
   // Search
   fff_search: {
@@ -398,6 +402,19 @@ export function ffiCreate(
 export function ffiDestroy(handle: NativeHandle): void {
   const library = loadLibrary();
   library.symbols.fff_destroy(handle);
+}
+
+export function ffiDrainChanges(handle: NativeHandle): string[] {
+  const library = loadLibrary();
+  const result = library.symbols.fff_drain_changes(handle);
+  // FFIType.cstring returns a String object directly, not a pointer
+  if (!result) return [];
+  const json = String(result); // Convert String object to primitive string
+  try {
+    return JSON.parse(json) as string[];
+  } catch {
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------------------

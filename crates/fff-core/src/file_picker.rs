@@ -39,7 +39,7 @@ use crate::grep::{GrepResult, GrepSearchOptions, grep_search};
 use crate::ignore::non_git_repo_overrides;
 use crate::query_tracker::QueryTracker;
 use crate::score::match_and_score_files;
-use crate::shared::{SharedFrecency, SharedPicker};
+use crate::shared::{SharedChangesQueue, SharedFrecency, SharedPicker};
 use crate::types::{ContentCacheBudget, FileItem, PaginationArgs, ScoringContext, SearchResult};
 use fff_query_parser::FFFQuery;
 use git2::{Repository, Status, StatusOptions};
@@ -421,6 +421,7 @@ impl FilePicker {
     pub fn new_with_shared_state(
         shared_picker: SharedPicker,
         shared_frecency: SharedFrecency,
+        changes_queue: Option<SharedChangesQueue>,
         options: FilePickerOptions,
     ) -> Result<(), Error> {
         let picker = Self::new(options)?;
@@ -459,6 +460,7 @@ impl FilePicker {
             mode,
             shared_picker,
             shared_frecency,
+            changes_queue,
             cancelled,
         );
 
@@ -516,6 +518,7 @@ impl FilePicker {
         &mut self,
         shared_picker: &SharedPicker,
         shared_frecency: &SharedFrecency,
+        changes_queue: Option<SharedChangesQueue>,
     ) -> Result<(), Error> {
         let git_workdir = self.sync_data.git_workdir.clone();
         let watcher = BackgroundWatcher::new(
@@ -523,6 +526,7 @@ impl FilePicker {
             git_workdir,
             shared_picker.clone(),
             shared_frecency.clone(),
+            changes_queue,
             self.mode,
         )?;
         self.background_watcher = Some(watcher);
@@ -999,6 +1003,7 @@ fn spawn_scan_and_watcher(
     mode: FFFMode,
     shared_picker: SharedPicker,
     shared_frecency: SharedFrecency,
+    changes_queue: Option<SharedChangesQueue>,
     cancelled: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
@@ -1060,6 +1065,7 @@ fn spawn_scan_and_watcher(
                 git_workdir,
                 shared_picker.clone(),
                 shared_frecency.clone(),
+                changes_queue,
                 mode,
             ) {
                 Ok(watcher) => {
